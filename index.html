@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C6 BLE Remote</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #e2e2dd; --accent: #2f6fde; --ok: #1f9d55; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141413; --card: #1e1e1c; --text: #ececea; --muted: #9a9a94;
+            --border: #33332f; --accent: #6f9ef5; --ok: #4ade80; --warn: #fb923c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 32px 16px; display: grid; gap: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  .sub { color: var(--muted); margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .spread { justify-content: space-between; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--card); color: var(--text);
+           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.on { background: var(--ok); }
+  .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 8px; }
+  .big { font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  input[type=color] { width: 56px; height: 40px; border: none; background: none; padding: 0; cursor: pointer; }
+  input[type=range] { flex: 1; min-width: 140px; }
+  .swatches button { width: 36px; height: 36px; padding: 0; border-radius: 50%; }
+  .pill { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .pill.pressed { background: var(--warn); border-color: var(--warn); color: #fff; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  #log { font: 12px/1.5 ui-monospace, monospace; color: var(--muted); max-height: 140px; overflow-y: auto; white-space: pre-wrap; margin: 0; }
+  .error { color: var(--warn); }
+  fieldset { border: none; margin: 0; padding: 0; min-width: 0; }
+  fieldset:disabled { opacity: .5; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>ESP32-C6 BLE Remote</h1>
+    <p class="sub">Controls the board straight from the browser over Bluetooth LE.</p>
+  </div>
+
+  <div class="card row spread">
+    <div class="row"><span id="dot" class="dot"></span><span id="status">Not connected</span></div>
+    <div class="row">
+      <button id="connect" class="primary">Connect</button>
+      <button id="disconnect" disabled>Disconnect</button>
+    </div>
+  </div>
+  <p id="unsupported" class="error" hidden></p>
+
+  <fieldset id="controls" disabled>
+    <div class="card" style="display:grid;gap:12px">
+      <p class="label">LED</p>
+      <div class="row">
+        <input type="color" id="color" value="#2f6fde">
+        <input type="range" id="brightness" min="0" max="255" value="60" aria-label="Brightness">
+        <span id="bval" style="width:3ch;text-align:right">60</span>
+      </div>
+      <div class="row swatches">
+        <button data-c="#ff0000" style="background:#ff0000" aria-label="Red"></button>
+        <button data-c="#00ff00" style="background:#00ff00" aria-label="Green"></button>
+        <button data-c="#0000ff" style="background:#0000ff" aria-label="Blue"></button>
+        <button data-c="#ff9900" style="background:#ff9900" aria-label="Orange"></button>
+        <button data-c="#ff00ff" style="background:#ff00ff" aria-label="Magenta"></button>
+        <button data-c="#ffffff" style="background:#ffffff" aria-label="White"></button>
+        <button id="off">Off</button>
+        <button id="rainbow">Rainbow</button>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <p class="label">Chip temperature</p>
+        <div class="big" id="temp">--</div>
+      </div>
+      <div class="card">
+        <p class="label">BOOT button</p>
+        <div style="margin-top:8px"><span id="btn" class="pill">released</span></div>
+        <div class="sub" style="margin-top:8px;font-size:13px">Presses: <span id="presses">0</span></div>
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="card">
+    <p class="label">Log</p>
+    <pre id="log"></pre>
+  </div>
+</main>
+
+<script>
+const SERVICE = '6e1f0001-6c0f-4b8e-9c5a-2d6b0c6e1f00';
+const LED     = '6e1f0002-6c0f-4b8e-9c5a-2d6b0c6e1f00';
+const TEMP    = '6e1f0003-6c0f-4b8e-9c5a-2d6b0c6e1f00';
+const BUTTON  = '6e1f0004-6c0f-4b8e-9c5a-2d6b0c6e1f00';
+
+const $ = id => document.getElementById(id);
+let device, ledChar, presses = 0, rainbowTimer = null;
+let writeBusy = false, pendingRgb = null;
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  $('log').textContent = `${t}  ${msg}\n` + $('log').textContent;
+}
+
+if (!navigator.bluetooth) {
+  $('unsupported').hidden = false;
+  $('unsupported').textContent = 'Web Bluetooth is not available. Use Chrome or Edge on localhost or https. ' +
+    'On Linux, enable chrome://flags/#enable-web-bluetooth (and possibly #enable-experimental-web-platform-features), then restart Chrome.';
+  $('connect').disabled = true;
+}
+
+function setConnected(on) {
+  $('dot').classList.toggle('on', on);
+  $('status').textContent = on ? `Connected to ${device.name}` : 'Not connected';
+  $('connect').disabled = on || !navigator.bluetooth;
+  $('disconnect').disabled = !on;
+  $('controls').disabled = !on;
+}
+
+async function connect() {
+  try {
+    // Filters are OR'd. Chrome on Linux doesn't always match 128-bit service UUIDs from
+    // the advertisement, so also match by name; optionalServices grants access either way.
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE] }, { namePrefix: 'C6-' }],
+      optionalServices: [SERVICE],
+    });
+    device.addEventListener('gattserverdisconnected', () => {
+      stopRainbow(); setConnected(false); log('Disconnected');
+    });
+    log(`Connecting to ${device.name}...`);
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    ledChar = await service.getCharacteristic(LED);
+
+    const temp = await service.getCharacteristic(TEMP);
+    temp.addEventListener('characteristicvaluechanged', e => {
+      $('temp').textContent = (e.target.value.getInt16(0, true) / 100).toFixed(1) + ' °C';
+    });
+    await temp.startNotifications();
+
+    const btn = await service.getCharacteristic(BUTTON);
+    btn.addEventListener('characteristicvaluechanged', e => {
+      const pressed = e.target.value.getUint8(0) === 1;
+      $('btn').textContent = pressed ? 'pressed' : 'released';
+      $('btn').classList.toggle('pressed', pressed);
+      if (pressed) { $('presses').textContent = ++presses; log('BOOT pressed'); }
+    });
+    await btn.startNotifications();
+
+    setConnected(true);
+    log('Connected');
+    sendColor();
+  } catch (err) {
+    log('Error: ' + err.message);
+  }
+}
+
+// Coalesce writes: BLE allows one GATT operation at a time, and sliders fire fast.
+async function writeRgb(r, g, b) {
+  pendingRgb = [r, g, b];
+  if (writeBusy || !ledChar) return;
+  writeBusy = true;
+  while (pendingRgb) {
+    const v = pendingRgb; pendingRgb = null;
+    try { await ledChar.writeValueWithResponse(new Uint8Array(v)); }
+    catch (err) { log('Write failed: ' + err.message); }
+  }
+  writeBusy = false;
+}
+
+function sendColor() {
+  const hex = $('color').value, k = $('brightness').value / 255;
+  const ch = i => Math.round(parseInt(hex.slice(i, i + 2), 16) * k);
+  writeRgb(ch(1), ch(3), ch(5));
+}
+
+function stopRainbow() {
+  clearInterval(rainbowTimer); rainbowTimer = null;
+  $('rainbow').textContent = 'Rainbow';
+}
+
+$('connect').onclick = connect;
+$('disconnect').onclick = () => device?.gatt.disconnect();
+$('color').oninput = () => { stopRainbow(); sendColor(); };
+$('brightness').oninput = () => { $('bval').textContent = $('brightness').value; if (!rainbowTimer) sendColor(); };
+document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => {
+  stopRainbow(); $('color').value = b.dataset.c; sendColor();
+});
+$('off').onclick = () => { stopRainbow(); writeRgb(0, 0, 0); };
+$('rainbow').onclick = () => {
+  if (rainbowTimer) return stopRainbow();
+  let h = 0;
+  $('rainbow').textContent = 'Stop';
+  rainbowTimer = setInterval(() => {
+    h = (h + 6) % 360;
+    const k = $('brightness').value / 255;
+    const f = n => { const x = (n + h / 60) % 6; return Math.round(255 * k * (1 - Math.max(0, Math.min(x, 4 - x, 1)))); };
+    writeRgb(f(5), f(3), f(1));
+  }, 60);
+};
+</script>
+</body>
+</html>
